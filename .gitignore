@@ -1,0 +1,20 @@
+# ----- .NET -----
+[Bb]in/
+[Oo]bj/
+*.user
+.vs/
+*.suo
+
+# ----- Node / Vite -----
+node_modules/
+dist/
+npm-debug.log*
+
+# ----- Env / secrets -----
+*.env
+!*.env.example
+EventPlatformUI/.env
+
+# ----- OS -----
+.DS_Store
+Thumbs.db

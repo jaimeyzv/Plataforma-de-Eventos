@@ -1,0 +1,159 @@
+# =============================================================================
+# Event Platform - local infrastructure & microservices
+# -----------------------------------------------------------------------------
+#   Infra : SQL Server, MongoDB, RabbitMQ, Redis
+#   APIs  : eventservice-api (SQL), notificationservice-api (NoSQL)
+#   UI    : eventplatform-ui (React, served by nginx)
+#
+#   Start everything:   docker compose up --build
+#   API (events):       http://localhost:8080/swagger
+#   API (notifications):http://localhost:8081/swagger
+#   UI:                 http://localhost:8082
+#   RabbitMQ console:   http://localhost:15672  (guest/guest)
+# =============================================================================
+
+name: event-platform
+
+services:
+  # ----------------------------- SQL Server (EventService) -------------------
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: ep-sqlserver
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "Your_strong_Pass123"
+      MSSQL_PID: "Developer"
+    ports:
+      - "1433:1433"
+    volumes:
+      - sqlserver-data:/var/opt/mssql
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1' -b -o /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # Creates the EventPlatform database + tables + seed, then exits.
+  sqlserver-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: ep-sqlserver-init
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    environment:
+      MSSQL_SA_PASSWORD: "Your_strong_Pass123"
+    volumes:
+      - ./database:/scripts:ro
+    entrypoint:
+      - /bin/bash
+      - -c
+      - '/opt/mssql-tools18/bin/sqlcmd -S sqlserver -U sa -P "$$MSSQL_SA_PASSWORD" -C -i /scripts/01-eventservice-schema.sql'
+    restart: "no"
+
+  # ----------------------------- MongoDB (NotificationService) ---------------
+  mongo:
+    image: mongo:7
+    container_name: ep-mongo
+    environment:
+      MONGO_INITDB_DATABASE: notificationdb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+      - ./database/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ----------------------------- RabbitMQ broker -----------------------------
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: ep-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ----------------------------- Redis cache ---------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: ep-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  # ----------------------------- EventService API ----------------------------
+  eventservice-api:
+    build:
+      context: ./EventPlatform
+      dockerfile: src/Services/EventService/Presentation/EventService.WebAPI/Dockerfile
+    container_name: ep-eventservice-api
+    depends_on:
+      sqlserver-init:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__Database: "Server=sqlserver,1433;Database=EventPlatform;User Id=sa;Password=Your_strong_Pass123;TrustServerCertificate=True;Encrypt=False"
+      ConnectionStrings__Redis: "redis:6379"
+      RabbitMq__Host: "rabbitmq"
+      RabbitMq__Port: "5672"
+      RabbitMq__Username: "guest"
+      RabbitMq__Password: "guest"
+      Cors__AllowedOrigins__0: "http://localhost:8082"
+      Cors__AllowedOrigins__1: "http://localhost:5173"
+    ports:
+      - "8080:8080"
+
+  # ----------------------------- NotificationService API ---------------------
+  notificationservice-api:
+    build:
+      context: ./EventPlatform
+      dockerfile: src/Services/NotificationService/Presentation/NotificationService.WebAPI/Dockerfile
+    container_name: ep-notificationservice-api
+    depends_on:
+      mongo:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      Mongo__ConnectionString: "mongodb://mongo:27017"
+      Mongo__Database: "notificationdb"
+      RabbitMq__Host: "rabbitmq"
+      RabbitMq__Port: "5672"
+      RabbitMq__Username: "guest"
+      RabbitMq__Password: "guest"
+    ports:
+      - "8081:8080"
+
+  # ----------------------------- React UI ------------------------------------
+  eventplatform-ui:
+    build:
+      context: ./EventPlatformUI
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: "http://localhost:8080"
+    container_name: ep-ui
+    depends_on:
+      - eventservice-api
+    ports:
+      - "8082:80"
+
+volumes:
+  sqlserver-data:
+  mongo-data:
